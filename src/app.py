@@ -407,12 +407,124 @@ def create_app():
             os.remove(filepath)
         return jsonify({'status': 'deleted'}), 200
         
+    @app.route('/api/robot/start-recording', methods=['POST'])
+    def api_start_recording():
+        data = request.get_json(force=True) or {}
+        rid = int(data.get('robotId'))
+        start_t = float(data.get('startTime', 0.0))
+
+        move = {
+            'id': str(uuid.uuid4()),
+            'robotId': rid,
+            'startT': start_t,
+            'endT': None,
+            'entries': []
+        }
+        with state.lock:
+            cs = state.course_state
+        
+            # record this new segment
+            cs['moves'].append(move)
+            # mark this robot as actively recording
+            cs.setdefault('recording_robots', set()).add(rid)
+
+            # turn on sampling if this is the first active robot
+            if not cs.get('sampling'):
+                cs['sampling'] = True
+                # wall-clock base so t == start_t right now
+                cs['sampling_start_time'] = time.time() - start_t
+
+            # (optional) keep a last-known course_time for non-sampling display
+            cs['course_time'] = start_t
+
+        ep = config.ROBOT_ENDPOINTS[rid]
+        set_mode(ep['ip'], 'reset')
+        time.sleep(0.2)  # small settle for IMU zeroing
+        set_mode(ep['ip'], 'record_start')
+        return jsonify(move), 200
 
 
+    @app.route('/api/robot/stop-recording', methods=['POST'])
+    def api_stop_recording():
+        data = request.get_json(force=True) or {}
+        rid = int(data.get('robotId'))
+
+        with state.lock:
+            cs = state.course_state
+            _clear_all_controller_selections_unlocked(state.play_state)
+            # compute current t from wall-clock base (fallback to stored course_time)
+            if cs.get('sampling') and 'sampling_start_time' in cs:
+                t_now = round(time.time() - cs['sampling_start_time'], 3)
+            else:
+                t_now = float(cs.get('course_time', 0.0))
+
+            # close the latest open move for this robot
+            for move in reversed(cs.get('moves', [])):
+                if move['robotId'] == rid and move.get('endT') is None:
+                    move['endT'] = t_now
+                    break
+
+            # stop recording this robot
+            cs.get('recording_robots', set()).discard(rid)
+
+            # if no robots still recording, end sampling and clear base
+            if not cs.get('recording_robots'):
+                cs['sampling'] = False
+                cs.pop('sampling_start_time', None)
+                cs['course_time'] = t_now  # freeze display at final time
+
+        ep = config.ROBOT_ENDPOINTS[rid]
+        set_mode(ep['ip'], 'record_stop')
+        return jsonify({'status': 'stopped'}), 200
 
 
         
+    @app.route('/api/moves/<move_id>', methods=['DELETE'])
+    def api_delete_move(move_id):
+        with state.lock:
+            ms = state.course_state['moves']
+            state.course_state['moves'] = [m for m in ms if m['id'] != move_id]
+        return jsonify({'status': 'deleted'}), 200
     
+    @app.route('/api/course/save', methods=['POST'])
+    def api_save_course():
+        data = request.get_json(force=True) or {}
+        cs = state.course_state
+        if cs['current_course'] is None:
+            return jsonify({'error': 'No active course'}), 400
+
+        # Persist updated name/duration
+        if 'name' in data:
+            cs['current_course']['name'] = data['name']
+        if 'duration' in data:
+            cs['current_course']['duration'] = data['duration']
+
+        # Write out moves
+        filepath = os.path.join(config.RECORDINGS_DIR, f"{cs['current_course']['id']}.json")
+        with open(filepath, 'w') as f:
+            json.dump(cs['moves'], f, indent=2)
+
+        # Append course metadata and update robot count
+        if cs['current_course'] not in cs['courses']:
+            cs['courses'].append(cs['current_course'])
+        # count unique robots with moves
+        cs['current_course']['robotCount'] = len({m['robotId'] for m in cs['moves']})
+        
+        cs['current_course']['moves'] = list(cs['moves'])
+        
+        save_courses(cs['courses'])
+
+        # Reset recording state
+        with state.lock:
+            cs['recording_robots'].clear()
+            cs['sampling'] = False
+            cs['course_time'] = 0.0
+            cs['moves'].clear()
+
+        return jsonify({
+            'filename': f"{cs['current_course']['id']}.json",
+            'courseId': cs['current_course']['id']
+        }), 200
 
     @app.route('/api/course/load/<course_id>', methods=['GET'])
     def api_load_course_file(course_id):
