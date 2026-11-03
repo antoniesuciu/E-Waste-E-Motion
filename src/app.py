@@ -287,10 +287,198 @@ def create_app():
 
 
     # --- Single-move playback -----------------------------------------------
+    @app.route('/api/move/run/<course_id>/<move_id>', methods=['POST'])
+    def api_run_single_move(course_id, move_id):
+        """
+        Play only one recorded move. Works with in-memory unsaved moves or from disk.
+        Times are retimed so this move starts immediately (t0 -> 0).
+        """
+        # Prefer in-memory if current course matches
+        with state.lock:
+            cs = state.course_state
+            if cs.get('current_course') and cs['current_course'].get('id') == course_id:
+                moves_src = deepcopy(cs.get('moves', []))
+            else:
+                moves_src = None
+
+        if moves_src is None:
+            # Load from saved file
+            filepath = os.path.join(config.RECORDINGS_DIR, f"{course_id}.json")
+            if not os.path.exists(filepath):
+                return jsonify({'error': 'Recording not found.'}), 404
+            with open(filepath, 'r') as f:
+                moves_src = json.load(f)
+
+        mv = next((m for m in moves_src if m.get('id') == move_id), None)
+        if not mv:
+            return jsonify({'error': 'Move not found.'}), 404
+
+        rid = int(mv.get('robotId'))
+        ents = list(mv.get('entries') or [])
+        if not ents:
+            return jsonify({'error': 'Move has no entries.'}), 400
+
+        start_idx = _first_start_idx(ents, accept_seq=(0, 1))
+        if start_idx is None:
+            return jsonify({'error': 'Move has no entries.'}), 400
+        ents = ents[start_idx:]
 
 
 
+        # Retimestamp so this move starts at 0
+        try:
+            t0 = float(ents[0]['t'])
+        except Exception:
+            t0 = 0.0
 
+        entries = []
+        for e in ents:
+            try:
+                t_rel = float(e.get('t', 0.0)) - t0
+            except Exception:
+                continue
+            entries.append((max(0.0, t_rel), rid, e.get('telemetry')))
+        entries.sort(key=lambda x: x[0])
+
+        token = f"move:{course_id}:{move_id}"
+        if token in playback_threads and playback_threads[token].is_alive():
+            return jsonify({'error': 'Move already running.'}), 400
+
+        # Arm only this robot
+        ep = config.ROBOT_ENDPOINTS[rid]
+        set_mode(ep['ip'], 'reset')
+        time.sleep(0.1)
+        set_mode(ep['ip'], 'play_start')
+        time.sleep(0.1)
+
+        stop_event = threading.Event()
+        playback_stop_events[token] = stop_event
+
+        def playback(stop_evt: threading.Event):
+            completed_naturally = False
+            try:
+                start = time.time()
+                total = len(entries)
+                print(f"[PlaybackMove:{move_id}] started with {total} entries for robot {rid}", flush=True)
+
+                for idx, (t_rel, rrid, telem) in enumerate(entries, start=1):
+                    if stop_evt.is_set():
+                        print(f"[PlaybackMove:{move_id}] stopped at entry {idx}", flush=True)
+                        break
+                    delay = (start + t_rel) - time.time()
+                    if delay > 0:
+                        time.sleep(delay)
+
+                    ep_local = config.ROBOT_ENDPOINTS[rrid]
+                    if telem:
+                        try:
+                            # same s1/s2 logic as your course runner
+                            s1_val = s2_val = None
+                            if str(rrid) in config.SERVO_BOTH_ROBOTS:
+                                s1_val = telem.get('s1'); s2_val = telem.get('s2')
+                            elif str(rrid) in config.SERVO_S1_ROBOTS:
+                                s1_val = telem.get('s1')
+                            elif str(rrid) in config.SERVO_S2_ROBOTS:
+                                s2_val = telem.get('s2')
+                            led_val = telem.get('l') if isinstance(telem, dict) and 'l' in telem else None
+                            t_ms_val = telem.get('t_ms') if isinstance(telem, dict) and 't_ms' in telem else None
+
+                            if rid == 9:
+                                if led_val is not None:
+                                    send_led_rid(ep['ip'], rid, led_val, t_ms=t_ms_val)
+                                # skip drivep entirely for robot 9
+                            elif rid == 10:
+                                # Drive primary
+                                drivep(
+                                    ep['ip'], rid,
+                                    telem.get('g', 0),  telem.get('A', 0), telem.get('B', 0),
+                                    telem.get('t', 0),  telem.get('s', 0),
+                                    s1=s1_val, s2=s2_val, led=led_val, t_ms=t_ms_val
+                                )
+                                # Fan out LED if present
+                                if led_val is not None:
+                                    for tgt in config.FANOUT_EXTRA_TARGETS.get(10, []):
+                                        try:
+                                            send_led_rid(tgt['ip'], rid, led_val, t_ms=t_ms_val)
+                                        except Exception as e:
+                                            print(f"[PlaybackMove:{move_id}] fanout to {tgt['ip']} failed: {e}", flush=True)
+
+                            else:
+                                drivep(
+                                    ep['ip'], rid,
+                                    telem.get('g', 0),  telem.get('A', 0), telem.get('B', 0),
+                                    telem.get('t', 0),  telem.get('s', 0),
+                                    s1=s1_val, s2=s2_val, led=led_val, t_ms=t_ms_val
+                                )
+                        except Exception as e:
+                            print(f"[PlaybackMove:{move_id}] ERROR: {e}", flush=True)
+                else:
+                    completed_naturally = True
+
+                if completed_naturally:
+                    try:
+                        ep0 = config.ROBOT_ENDPOINTS[rid]
+                        set_mode(ep0['ip'], 'play_stop')
+                        time.sleep(0.05)
+                        print(f"[PlaybackMove:{move_id}] sent play_stop to robot {rid}", flush=True)
+                    except Exception as e:
+                        print(f"[PlaybackMove:{move_id}] play_stop failed: {e}", flush=True)
+            finally:
+                playback_stop_events.pop(token, None)
+                playback_threads.pop(token, None)
+                print(f"[PlaybackMove:{move_id}] thread exiting", flush=True)
+
+        thread = threading.Thread(target=playback, args=(stop_event,), daemon=True)
+        playback_threads[token] = thread
+        thread.start()
+
+        return jsonify({'status': 'Playback started', 'courseId': course_id, 'moveId': move_id}), 200
+
+
+    @app.route('/api/move/stop/<course_id>/<move_id>', methods=['POST'])
+    def api_stop_single_move(course_id, move_id):
+        token = f"move:{course_id}:{move_id}"
+        stop_event = playback_stop_events.get(token)
+        thread = playback_threads.get(token)
+        if not stop_event or not thread:
+            return jsonify({'error': 'Move not running.'}), 400
+
+        # Try to send play_stop to that robot (best-effort)
+        rid = None
+        with state.lock:
+            cs = state.course_state
+            if cs.get('current_course') and cs['current_course'].get('id') == course_id:
+                mv = next((m for m in cs.get('moves', []) if m.get('id') == move_id), None)
+                if mv: rid = int(mv.get('robotId'))
+        if rid is None:
+            filepath = os.path.join(config.RECORDINGS_DIR, f"{course_id}.json")
+            if os.path.exists(filepath):
+                try:
+                    with open(filepath, 'r') as f:
+                        ms = json.load(f)
+                    mv = next((m for m in ms if m.get('id') == move_id), None)
+                    if mv: rid = int(mv.get('robotId'))
+                except Exception:
+                    pass
+        if rid is not None:
+            ep = config.ROBOT_ENDPOINTS[rid]
+            try:
+                set_mode(ep['ip'], 'play_stop')
+                time.sleep(0.1)
+            except Exception as e:
+                print(f"[PlaybackMove:{move_id}] play_stop on stop failed: {e}", flush=True)
+
+        stop_event.set()
+        thread.join(timeout=0.1)
+        return jsonify({'status': 'Playback stopping', 'courseId': course_id, 'moveId': move_id}), 200
+
+
+    @app.route('/api/move/run/<course_id>/<move_id>/status', methods=['GET'])
+    def api_move_status(course_id, move_id):
+        token = f"move:{course_id}:{move_id}"
+        th = playback_threads.get(token)
+        running = bool(th and th.is_alive())
+        return jsonify({'courseId': course_id, 'moveId': move_id, 'running': running}), 200
     # ----------------------------------------------------------------------
 
 
@@ -539,13 +727,217 @@ def create_app():
     def api_download_course(course_id):
         return send_from_directory(config.RECORDINGS_DIR, f"{course_id}.json", as_attachment=True)
 
+    @app.route('/api/run/<course_id>/status', methods=['GET'])
+    def api_run_status(course_id):
+        """
+        Returns whether the given course is currently playing.
+        True if we still have a thread and it's alive; false otherwise.
+        """
+        thread = playback_threads.get(course_id)
+        running = bool(thread and thread.is_alive())
+        return jsonify({'courseId': course_id, 'running': running}), 200
 
 
+    @app.route('/api/run/<course_id>', methods=['POST'])
+    def api_run_course(course_id):
+        data = request.get_json(silent=True) or {}
+        course = utils.find_course(state.course_state['courses'], course_id)
+        if not course:
+            return jsonify({'error': 'Course not found.'}), 404
+
+        # Load recorded moves
+        filepath = os.path.join(config.RECORDINGS_DIR, f"{course_id}.json")
+        try:
+            with open(filepath, 'r') as f:
+                moves = json.load(f)
+        except FileNotFoundError:
+            return jsonify({'error': 'Recording not found.'}), 404
+
+        # --- NEW: per-move trim + reset marker 0.4s before trimmed start ---
+        trimmed_moves = []
+        reset_markers = []  # (t_reset, rid, {'action':'reset'})
+        for move in moves:
+            rid = move.get('robotId')
+            ents = move.get('entries', []) or []
+            # find first seq==0
+            start_idx = _first_start_idx(ents, accept_seq=(0, 1))
+            if start_idx is None:
+                continue 
+            m = dict(move)
+            m['entries'] = ents[start_idx:]
+            trimmed_moves.append(m)
+
+            # reset marker 0.4s before first kept entry (min 0.0)
+            try:
+                t0 = float(m['entries'][0]['t'])
+            except Exception:
+                continue
+            t_reset = max(0.0, t0 - 0.4)
+            reset_markers.append((t_reset, rid, {'action': 'reset'}))
+        moves = trimmed_moves
+        # --------------------------------------------------------------------
+
+        # Flatten and sort entries by recorded timestamp t
+        entries = []
+        # include reset markers
+        entries.extend(reset_markers)
+
+        for move in moves:
+            rid = move['robotId']
+            for entry in move.get('entries', []):
+                t = entry.get('t')
+                if t is None:
+                    continue
+                telem = entry.get('telemetry')
+                entries.append((float(t), rid, telem))
+
+        entries.sort(key=lambda e: e[0])
+
+        if course_id in playback_threads and playback_threads[course_id].is_alive():
+            return jsonify({'error': 'Course already running.'}), 400
+
+        robots_in_run = sorted({rid for _, rid, _ in entries})
+        first_robot = robots_in_run[0] if robots_in_run else None  # <-- needed
+
+        # One-time reset + arm (kept)
+        for rid in robots_in_run:
+            ep = config.ROBOT_ENDPOINTS[rid]
+            set_mode(ep['ip'], 'reset')
+            time.sleep(0.1)
+            set_mode(ep['ip'], 'play_start')
+            time.sleep(0.05)
+
+        stop_event = threading.Event()
+        playback_stop_events[course_id] = stop_event
+
+        def playback(stop_evt: threading.Event):
+            completed_naturally = False
+            try:
+                start = time.time()
+                total = len(entries)
+                print(f"[Playback:{course_id}] started with {total} entries", flush=True)
+
+                for idx, (t, rid, telem) in enumerate(entries, start=1):
+                    if stop_evt.is_set():
+                        print(f"[Playback:{course_id}] stopped at entry {idx}", flush=True)
+                        break
+
+                    scheduled = start + t
+                    delay = scheduled - time.time()
+                    print(f"[Playback:{course_id} {idx}/{total}] sleeping {delay:.3f}s …", flush=True)
+                    if delay > 0:
+                        time.sleep(delay)
+
+                    ep = config.ROBOT_ENDPOINTS[rid]
+
+                    if telem:
+                        # NEW: action marker
+                        if isinstance(telem, dict) and telem.get('action') == 'reset':
+                            try:
+                                set_mode(ep['ip'], 'reset')
+                                print(f"[Playback:{course_id} {idx}/{total}] action reset → robot {rid}", flush=True)
+                            except Exception as e:
+                                print(f"[Playback:{course_id}] reset action failed: {e}", flush=True)
+                            continue
+
+                        # Normal drive packet
+                        try:
+                            s1_val = s2_val = None
+                            if str(rid) in config.SERVO_BOTH_ROBOTS:
+                                s1_val = telem.get('s1')
+                                s2_val = telem.get('s2')
+                            elif str(rid) in config.SERVO_S1_ROBOTS:
+                                s1_val = telem.get('s1')
+                            elif str(rid) in config.SERVO_S2_ROBOTS:
+                                s2_val = telem.get('s2')
+                                                    # Optional LED command (only if present in the log)
+                            led_val = telem.get('l') if isinstance(telem, dict) and 'l' in telem else None
+
+                            # Optional timestamp for smoother ramps
+                            t_ms_val = telem.get('t_ms') if isinstance(telem, dict) and 't_ms' in telem else None
+                            if rid == 9:
+                                if led_val is not None:
+                                    send_led_rid(ep['ip'], rid, led_val, t_ms=t_ms_val)
+                                # skip drivep entirely for robot 9
+                            elif rid == 10:
+                                # --- primary target (same as default flow) ---
+                                if led_val is not None:
+                                    send_led_rid(ep['ip'], rid, led_val, t_ms=t_ms_val)
+                                # --- fan out to extra targets for robot 10 ---
+                                for tgt in config.FANOUT_EXTRA_TARGETS.get(10, []):
+                                    try:
+                                        if led_val is not None:
+                                            send_led_rid(tgt['ip'], rid, led_val, t_ms=t_ms_val)
+                                    except Exception as e:
+                                        print(f"[Playback:{course_id}] fanout to {tgt['ip']} failed: {e}", flush=True)
+                            else:
+                                drivep(
+                                    ep['ip'], rid,
+                                    telem.get('g', 0),  telem.get('A', 0), telem.get('B', 0),
+                                    telem.get('t', 0),  telem.get('s', 0),
+                                    s1=s1_val, s2=s2_val, led=led_val, t_ms=t_ms_val
+                                )
+                            print(f"[Playback:{course_id} {idx}/{total}] sent {telem}", flush=True)
+                        except Exception as e:
+                            print(f"[Playback:{course_id}] ERROR: {e}", flush=True)
+                else:
+                    completed_naturally = True
+
+                # Send play_stop to ALL robots that were in this run if we finished naturally
+                if completed_naturally:
+                    for rid_stop in robots_in_run:
+                        try:
+                            ep0 = config.ROBOT_ENDPOINTS[rid_stop]
+                            set_mode(ep0['ip'], 'play_stop')
+                            time.sleep(0.03)  # tiny stagger so we don't blast the NIC
+                            print(f"[Playback:{course_id}] sent play_stop to robot {rid_stop}", flush=True)
+                        except Exception as e:
+                            print(f"[Playback:{course_id}] play_stop to robot {rid_stop} failed: {e}", flush=True)
+
+            finally:
+                # Cleanup always
+                playback_stop_events.pop(course_id, None)
+                playback_threads.pop(course_id, None)
+                print(f"[Playback:{course_id}] thread exiting", flush=True)
+
+        thread = threading.Thread(target=playback, args=(stop_event,), daemon=True)
+        playback_threads[course_id] = thread
+        thread.start()
+
+        return jsonify({'status': 'Playback started', 'courseId': course_id}), 200
 
 
 
 
     
+    @app.route('/api/stop/<course_id>', methods=['POST'])
+    def api_stop_course(course_id):
+        stop_event = playback_stop_events.get(course_id)
+        thread     = playback_threads.get(course_id)
+
+        if not stop_event or not thread:
+            print(f"[Playback:{course_id}] stop requested but no running thread found", flush=True)
+            return jsonify({'error': 'Course not running.'}), 400
+    
+        for rid, ep in config.ROBOT_ENDPOINTS.items():
+            try:
+                set_mode(ep['ip'], 'play_stop')
+                time.sleep(0.02)
+            except Exception:
+                pass
+            
+        print(f"[Playback:{course_id}] stop requested → setting stop_event", flush=True)
+        stop_event.set()
+
+        # Give the thread a moment to notice and exit
+        thread.join(timeout=0.1)
+
+        if thread.is_alive():
+            print(f"[Playback:{course_id}] WARNING: thread still alive after stop", flush=True)
+        else:
+            print(f"[Playback:{course_id}] confirmed stopped", flush=True)
+
+        return jsonify({'status': 'Playback stopping', 'courseId': course_id}), 200
 
         
     return app
