@@ -220,9 +220,70 @@ def create_app():
 
 
     # Course CRUD
+    @app.route('/api/courses', methods=['GET'])
+    def api_get_courses():
+        return jsonify(state.course_state['courses']), 200
 
+    @app.route('/api/courses', methods=['POST'])
+    def api_create_course():
+        data = request.get_json(force=True) or {}
+        name = data.get('name', '')
+        duration = data.get('duration', 0)
+        course = create_course(name, duration)
+
+        with state.lock:
+            cs = state.course_state
+            ps = state.play_state
+
+            # course reset
+            cs['current_course'] = course
+            cs['course_time'] = 0.0
+            cs['recording_robots'].clear()
+            cs['sampling'] = False
+            cs['moves'].clear()
+
+            # play_state reset → two controllers, no selection by default
+            ps['controllers'] = {
+                '1': {
+                    'selected_robot': None,
+                    'axes': [],
+                    'buttons': [],
+                    'enabled': True,
+                    'disabled': False,
+                    'last_update': None,
+                },
+                '2': {
+                    'selected_robot': None,
+                    'axes': [],
+                    'buttons': [],
+                    'enabled': True,
+                    'disabled': False,
+                    'last_update': None,
+                },
+            }
+            ps['telemetry'] = {}
+
+            # clean up any legacy single-controller keys if they exist
+            for k in ('selected_robot', 'axes', 'buttons', 'last_update'):
+                ps.pop(k, None)
+
+        return jsonify(course), 201
 
     
+    @app.route('/api/courses/<course_id>', methods=['GET'])
+    def api_get_course(course_id):
+        course = find_course(state.course_state['courses'], course_id)
+        if course:
+            # Load saved moves
+            filepath = os.path.join(config.RECORDINGS_DIR, f"{course_id}.json")
+            if os.path.exists(filepath):
+                with open(filepath, 'r') as f:
+                    course['moves'] = json.load(f)
+                course['robotCount'] = len({m['robotId'] for m in course['moves']})
+            else:
+                course['moves'] = []
+            return jsonify(course), 200
+        return jsonify({'error': 'Course not found.'}), 404
 
 
     # --- Single-move playback -----------------------------------------------
@@ -233,11 +294,118 @@ def create_app():
     # ----------------------------------------------------------------------
 
 
+    @app.route('/api/course/edit/<course_id>/begin', methods=['POST'])
+    def api_begin_edit_course(course_id):
+        # load course metadata
+        courses_list = load_courses()
+        course = find_course(courses_list, course_id)
+        if not course:
+            return jsonify({'error': 'Course not found.'}), 404
+
+        # load moves file (if any)
+        filepath = os.path.join(config.RECORDINGS_DIR, f"{course_id}.json")
+        moves = []
+        if os.path.exists(filepath):
+            with open(filepath, 'r') as f:
+                moves = json.load(f)
+
+        # set as current course and prime in-memory state
+        with state.lock:
+            cs = state.course_state
+
+            # active course
+            cs['current_course'] = deepcopy(course)
+
+            # fresh editing state
+            cs['moves'] = moves
+            cs['recording_robots'] = set()
+            cs['sampling'] = False
+            cs['course_time'] = 0.0
+            cs.pop('sampling_start_time', None)
+
+            # two-controller fresh state
+            _reset_play_state_unlocked(state.play_state)
+
+        # include robotCount for convenience
+        course_out = dict(course)
+        course_out['moves'] = moves
+        course_out['robotCount'] = len({m.get('robotId') for m in moves})
+
+        return jsonify(course_out), 200
 
 
     # Edit a course (metadata only: name, duration)
+    @app.route('/api/courses/<course_id>', methods=['PATCH', 'PUT'])
+    def api_update_course(course_id):
+        data = request.get_json(force=True) or {}
+
+        # Only allow fields you already persist
+        allowed = {'name', 'duration'}
+        unknown = set(data.keys()) - allowed
+        if unknown:
+            return jsonify({'error': f'Unknown fields: {sorted(unknown)}'}), 400
+
+        # For PUT, require both fields
+        if request.method == 'PUT':
+            missing = [k for k in allowed if k not in data]
+            if missing:
+                return jsonify({'error': f'Missing fields for PUT: {missing}'}), 400
+
+        # Basic type normalization
+        if 'duration' in data:
+            try:
+                # accept int/float/str → float
+                data['duration'] = float(data['duration'])
+            except (TypeError, ValueError):
+                return jsonify({'error': 'duration must be a number'}), 400
+
+        with state.lock:
+            courses_list = state.course_state['courses']
+            course = find_course(courses_list, course_id)
+            if not course:
+                return jsonify({'error': 'Course not found.'}), 404
+
+            # Merge updates
+            updated = dict(course)
+            for k in allowed:
+                if k in data:
+                    updated[k] = data[k]
+
+            # Update in-memory list
+            for i, c in enumerate(courses_list):
+                if c.get('id') == course_id:
+                    courses_list[i] = updated
+                    break
+
+            # If this is also the active course, mirror the change
+            cc = state.course_state.get('current_course')
+            if cc and cc.get('id') == course_id:
+                for k in allowed:
+                    if k in data:
+                        cc[k] = data[k]
+
+            # Persist to courses.json
+            save_courses(courses_list)
+
+        return jsonify(updated), 200
 
         # Delete a course and its recording
+    @app.route('/api/courses/<course_id>', methods=['DELETE'])
+    def api_delete_course(course_id):
+        # Remove from courses.json
+        courses_list = load_courses()
+        course = find_course(courses_list, course_id)
+        if not course:
+            return jsonify({'error': 'Course not found.'}), 404
+        updated = [c for c in courses_list if c['id'] != course_id]
+        save_courses(updated)
+        # Also update in-memory state list
+        state.course_state['courses'] = updated
+        # Delete associated moves file
+        filepath = os.path.join(config.RECORDINGS_DIR, f"{course_id}.json")
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        return jsonify({'status': 'deleted'}), 200
         
 
 
@@ -246,7 +414,18 @@ def create_app():
         
     
 
+    @app.route('/api/course/load/<course_id>', methods=['GET'])
+    def api_load_course_file(course_id):
+        filepath = os.path.join(config.RECORDINGS_DIR, f"{course_id}.json")
+        if not os.path.exists(filepath):
+            return jsonify({'error': 'Course file not found'}), 404
+        with open(filepath, 'r') as f:
+            moves = json.load(f)
+        return jsonify({'id': course_id, 'moves': moves}), 200
 
+    @app.route('/api/course/download/<course_id>', methods=['GET'])
+    def api_download_course(course_id):
+        return send_from_directory(config.RECORDINGS_DIR, f"{course_id}.json", as_attachment=True)
 
 
 
