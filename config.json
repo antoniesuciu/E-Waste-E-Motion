@@ -1,0 +1,17 @@
+{
+  "devices": [
+    {
+      "name": "arm-front",
+      "ip": "192.168.4.101",
+      "port": 5005
+    },
+    {
+      "name": "arm-rear",
+      "ip": "192.168.4.102",
+      "port": 5005
+    }
+  ],
+  "network": {
+    "local_port": 0
+  }
+}
