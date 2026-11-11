@@ -14,6 +14,15 @@ check_backend() {
     "$python_bin" -m unittest discover -s tests -v
 }
 
+check_firmware() {
+    # Host-side test of pure firmware logic; the sketch itself needs arduino-cli + the ESP32 core.
+    local bin
+    bin="$(mktemp)"
+    trap 'rm -f "$bin"' RETURN
+    "${CC:-cc}" -std=c99 -Wall -Wextra -Werror -o "$bin" firmware/test/test_encoder_math.c
+    "$bin"
+}
+
 check_frontend() {
     (cd frontend && npm run build)
     test -s static/bundle.js
@@ -22,7 +31,8 @@ check_frontend() {
 
 case "${1:-all}" in
     backend) check_backend ;;
+    firmware) check_firmware ;;
     frontend) check_frontend ;;
-    all) check_backend; check_frontend ;;
-    *) echo "Usage: bash scripts/check.sh [all|backend|frontend]" >&2; exit 2 ;;
+    all) check_backend; check_firmware; check_frontend ;;
+    *) echo "Usage: bash scripts/check.sh [all|backend|firmware|frontend]" >&2; exit 2 ;;
 esac
