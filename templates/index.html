@@ -1,9 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ro">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Robot Controller</title>
+  <title>E-Waste E-Motion · Control</title>
 
   <!-- Serve the built Tailwind CSS -->
   <link
@@ -13,6 +13,7 @@
 </head>
 <body>
   <div id="root"></div>
+  <script>window.ROBOT_IDS = {{ robots | tojson }};</script>
 
   <!-- Serve the built React bundle -->
   <script

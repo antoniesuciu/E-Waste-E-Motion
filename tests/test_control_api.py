@@ -54,6 +54,9 @@ class ControlAPITest(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"/static/bundle.js", response.data)
+        self.assertIn(b"window.ROBOT_IDS = %s" % json.dumps(config.ROBOT_IDS).encode(), response.data)
+        for route in ("/live", "/create-course/some-id"):
+            self.assertEqual(self.client.get(route).status_code, 200, route)
         robots = self.client.get("/robots").get_json()
         self.assertEqual(robots["available"], config.ROBOT_IDS)
         self.assertEqual(robots["selected"], {"1": None, "2": None})
