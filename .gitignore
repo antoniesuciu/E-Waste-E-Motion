@@ -14,6 +14,7 @@ __pycache__/
 
 # Credentials and local configuration
 .env
+/firmware/robot/secrets.h
 .env.*
 !.env.example
 

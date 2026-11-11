@@ -116,7 +116,9 @@ def create_app():
         return resp
 
     @app.route('/')
-    def index():
+    @app.route('/live')
+    @app.route('/create-course/<course_id>')
+    def index(course_id=None):  # client-side routes must survive a browser refresh
         return render_template('index.html', robots=config.ROBOT_IDS)
 
             
