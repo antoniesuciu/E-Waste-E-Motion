@@ -32,19 +32,19 @@ Command packets are JSON over UDP, normally on port 12345. Telemetry is configur
 
 Robot 9 has LED-only handling. Robot 10 has special lighting/brightness handling, with extra LED targets in `FANOUT_EXTRA_TARGETS`. Servo whitelists and joystick paths are in `src/config.py`. The root `config.json` is a preserved device configuration artifact; the current Python modules do not load it.
 
-Firmware, electrical design, motor calibration, and physical network setup are not included. A configured robot ID is a software target, not evidence of a distinct physical robot in the production.
+The differential-drive robot firmware is in `firmware/` and documents the same protocol from the device side. Other devices' firmware, electrical design, motor calibration, and physical network setup are not included. A configured robot ID is a software target, not evidence of a distinct physical robot in the production.
 
 ## Baseline limitations
 
 These are source-level findings, not a claim that the archived production failed:
 
-- **Robot lists differ.** Backend configuration has IDs 1–14; controller selection renders 1–15; the timeline renders tracks 1–10. Backend validation rejects ID 15.
-- **Controller toggles are local UI state.** They do not disable the Pygame sender. Clearing a selection affects the backend assignment; a display toggle is not an emergency stop.
+- **Robot lists differed** (backend 1–14, controller UI 1–15, timeline 1–10). Fixed: the template injects `config.ROBOT_IDS` and every view reads it.
+- **Controller toggles were local UI state** that looked like a disable switch. Removed. Clearing a selection is the only browser-side way to stop sending to a robot.
 - **Telemetry listeners share ports.** Startup creates one listener per endpoint even when several endpoints use the same telemetry port. Their sockets use `SO_REUSEADDR`; this is not a single coordinated receiver.
-- **Browser deep links lack a Flask fallback.** Navigate from `/`; refreshing a frontend route such as `/live` can return a server 404.
+- **Browser deep links lacked a Flask fallback.** Fixed for `/live` and `/create-course/<id>`.
 - **Thread stop timing is best-effort.** Playback uses sleeps between entries and short joins on stop requests. Stop responsiveness has not been measured on hardware.
 - **Storage and state are local.** Relative paths, JSON writes, and process-global state assume one control host and one process. The archive does not provide a multi-user concurrency model.
 - **Server settings are for a trusted network.** The hardware entry point enables Flask debug mode, binds all interfaces, and sets permissive CORS. There is no authentication layer.
-- **No archived type-check setup.** Vite transpiles TypeScript without checking types. The ZIP contains no `tsconfig.json`; duplicate `.ts` and `.tsx` event-stream hooks are preserved.
+- **No archived type-check setup.** Vite transpiles TypeScript without checking types. The ZIP contains no `tsconfig.json`. The duplicate `.tsx` event-stream hook has been removed.
 
 Future changes should address these in separate commits with appropriate tests. This import deliberately preserves the working project's implementation.
