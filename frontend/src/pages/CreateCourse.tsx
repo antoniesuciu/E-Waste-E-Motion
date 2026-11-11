@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { toast } from '@/hooks/use-toast';
 import { useEventStream } from '@/hooks/useEventStream';
+import { ROBOT_IDS, robotLabel } from '@/lib/robots';
 
 interface RecordedMove {
   id: string;
@@ -27,51 +28,7 @@ interface RobotTimeline {
 
 type ControllerId = 1 | 2;
 
-const ROBOTS = Array.from({ length: 10 }, (_, i) => i + 1);
-
-// ------------------------------
-// Nicknames (id -> nickname)
-// Only display logic is changed. All endpoints & payloads stay the same.
-// ------------------------------
-const NICKNAMES: Record<number, string> = {
-  1: 'AMIS',
-  2: 'OGLINDA',
-  3: 'FOTOLIU',
-  4: 'SCANNER',
-  5: 'ASPIRATOR',
-  6: 'JUCARIE 1',
-  7: 'JUCARIE 2',
-  8: 'BRAT',
-  9: 'BROSELE',
-  10: 'LUMINI',
-};
-
-const labelForId = (id: number): string => {
-  const nn = NICKNAMES[id];
-  return nn ? nn : `Robot ${id}`;
-};
-
-const idFromLabel = (label: string): number | null => {
-  // Accept labels like "Robot 1" or just the nickname
-  const m = label.match(/^Robot\s+(\d+)/i);
-  if (m) {
-    const id = Number(m[1]);
-    return Number.isFinite(id) ? id : null;
-  }
-  // Allow selecting by pure nickname
-  const lower = label.toLowerCase().trim();
-  for (const [k, v] of Object.entries(NICKNAMES)) {
-    if (v.toLowerCase() === lower) return Number(k);
-  }
-  return null;
-};
-
-const NONE_LABEL = 'Fără robot'; // “None / Stand-by” in RO
-
-// Render labels for 15 robots, with nicknames only if defined
-const ROBOT_IDS = Array.from({ length: 15 }, (_, i) => i + 1);
-const ROBOT_LABELS = ROBOT_IDS.map(labelForId);
-
+const ROBOTS = ROBOT_IDS;
 
 // mm:ss (or h:mm:ss) formatter
 const fmt = (secs: number) => {
@@ -414,7 +371,7 @@ useEffect(() => {
 
   const handleSaveCourse = async () => {
     if (!courseName.trim()) {
-      toast({ title: "Error", description: "Please enter a course name", variant: "destructive" });
+      toast({ title: "Eroare", description: "Introduceți numele traseului", variant: "destructive" });
       return;
     }
     try {
@@ -454,7 +411,7 @@ useEffect(() => {
           </div>
           <Button onClick={handleSaveCourse} className="flex items-center space-x-2">
             <Save className="h-4 w-4" />
-            <span>Save Course</span>
+            <span>Salvați traseul</span>
           </Button>
         </div>
 
@@ -464,11 +421,11 @@ useEffect(() => {
             <CardHeader><CardTitle>Setări traseu</CardTitle></CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <Label htmlFor="courseName">Course Name</Label>
+                <Label htmlFor="courseName">Numele traseului</Label>
                 <Input id="courseName" value={courseName} onChange={e => setCourseName(e.target.value)} placeholder="Numele traseului" />
               </div>
               <div>
-                <Label htmlFor="duration">Durata (minutes)</Label>
+                <Label htmlFor="duration">Durata (minute)</Label>
                 <Input
                   id="duration"
                   type="number"
@@ -600,7 +557,7 @@ useEffect(() => {
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-3">
                         <h3 className="font-medium min-w-[80px]">
-			  {NICKNAMES[robotId] ?? `Robot ${robotId}`}
+			  {robotLabel(robotId)}
 			</h3>
                         <div className="flex space-x-2">
                           {/* C1 / C2 selector (exclusive) */}
@@ -634,7 +591,7 @@ useEffect(() => {
                               className="flex items-center space-x-1"
                             >
                               <Play className="h-3 w-3" />
-                              <span>Record</span>
+                              <span>Înregistrare</span>
                             </Button>
                           ) : (
                             <Button
@@ -644,12 +601,12 @@ useEffect(() => {
                               className="flex items-center space-x-1"
                             >
                               <Square className="h-3 w-3" />
-                              <span>Stop</span>
+                              <span>Oprire</span>
                             </Button>
                           )}
                         </div>
                       </div>
-                      <span className="text-sm text-muted-foreground">{timeline?.moves.length || 0} moves</span>
+                      <span className="text-sm text-muted-foreground">{timeline?.moves.length || 0} mișcări</span>
                     </div>
 
                     {/* Track with minute markers */}

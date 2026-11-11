@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Plus, BookOpen, Clock, Users, Play ,StopCircle, Loader2, Trash2} from 'lucide-react';
 import GamepadController from '@/components/GamepadController';
+import { toast } from '@/hooks/use-toast';
 
 interface Course {
   id: string;
@@ -22,6 +23,7 @@ export default function Dashboard() {
   const [runningCourseId, setRunningCourseId] = useState<string | null>(null);
   const [loadingCourseId, setLoadingCourseId] = useState<string | null>(null);
   const [editingCourseId, setEditingCourseId] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const handleCreateCourse = async () => {
     setCreating(true);
@@ -43,58 +45,41 @@ export default function Dashboard() {
   const fetchCourses = async () => {
     try {
       const response = await fetch('/api/courses');
-      if (response.ok) {
-        const data = await response.json();
-        setCourses(data);
-      }
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      setCourses(await response.json());
+      setLoadError(null);
     } catch (error) {
-      console.error('Eroare in incarcarea traseelor:', error);
-      // For demo purposes, add some mock data
-      setCourses([
-        {
-          id: '1',
-          name: 'Basic Formation',
-          duration: 30,
-          robotCount: 5,
-          createdAt: '2025-01-15T10:00:00Z'
-        },
-        {
-          id: '2',
-          name: 'Advanced Choreography',
-          duration: 45,
-          robotCount: 8,
-          createdAt: '2025-01-14T15:30:00Z'
-        }
-      ]);
+      console.error('Eroare la încărcarea traseelor:', error);
+      setLoadError('Traseele nu au putut fi încărcate. Verificați că serverul rulează.');
     } finally {
       setLoading(false);
     }
   };
-  
-	useEffect(() => {
-	  if (!runningCourseId) return;
 
-	  let cancelled = false;
-	  const poll = async () => {
-	    try {
-	      const res = await fetch(`/api/run/${runningCourseId}/status`);
-	      if (!res.ok) throw new Error('status not ok');
-	      const data = await res.json();
-	      if (!data.running && !cancelled) {
-		setRunningCourseId(null);
-	      }
-	    } catch (e) {
-	      // Treat failures as "not running" to avoid stuck UI
-	      if (!cancelled) setRunningCourseId(null);
-	    }
-	  };
+  useEffect(() => {
+    if (!runningCourseId) return;
 
-	  // Check quickly, then every second
-	  poll();
-	  const id = setInterval(poll, 1000);
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/run/${runningCourseId}/status`);
+        if (!res.ok) throw new Error('status not ok');
+        const data = await res.json();
+        if (!data.running && !cancelled) {
+    setRunningCourseId(null);
+        }
+      } catch (e) {
+        // Treat failures as "not running" to avoid stuck UI
+        if (!cancelled) setRunningCourseId(null);
+      }
+    };
 
-	  return () => { cancelled = true; clearInterval(id); };
-	}, [runningCourseId]);
+    // Check quickly, then every second
+    poll();
+    const id = setInterval(poll, 1000);
+
+    return () => { cancelled = true; clearInterval(id); };
+  }, [runningCourseId]);
 
   useEffect(() => {
     fetchCourses();
@@ -107,7 +92,7 @@ export default function Dashboard() {
   };
 
   const formatDate = (dateString: string) => {
-    return new Date(dateString).toLocaleDateString('en-US', {
+    return new Date(dateString).toLocaleDateString('ro-RO', {
       month: 'short',
       day: 'numeric',
       year: 'numeric'
@@ -133,7 +118,7 @@ export default function Dashboard() {
     }
   };
 
-	
+  
   const handleEditCourse = async (courseId: string) => {
     setEditingCourseId(courseId);
     try {
@@ -149,12 +134,15 @@ export default function Dashboard() {
     }
   };
 
-  const handleDeleteCourse = async (courseId: string) => {
+  const handleDeleteCourse = async (course: Course) => {
+    if (!window.confirm(`Ștergeți traseul „${course.name}” și înregistrările lui?`)) return;
     try {
-      await fetch(`/api/courses/${courseId}`, { method: 'DELETE' });
-      setCourses(courses.filter(course => course.id !== courseId));
+      const res = await fetch(`/api/courses/${course.id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setCourses(prev => prev.filter(c => c.id !== course.id));
     } catch (error) {
       console.error('Failed to delete course:', error);
+      toast({ title: 'Eroare', description: 'Traseul nu a putut fi șters', variant: 'destructive' });
     }
   };
 
@@ -181,7 +169,12 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {loading ? (
               <div className="col-span-full text-center py-8 text-muted-foreground">
-                Loading courses...
+                Se încarcă traseele…
+              </div>
+            ) : loadError ? (
+              <div className="col-span-full text-center py-8 space-y-3">
+                <p className="text-destructive">{loadError}</p>
+                <Button variant="outline" onClick={() => { setLoading(true); fetchCourses(); }}>Reîncercați</Button>
               </div>
             ) : courses.length === 0 ? (
               <div className="col-span-full text-center py-8">
@@ -203,9 +196,11 @@ export default function Dashboard() {
                   <CardHeader className="pb-3">
                     <div className="flex items-center justify-between">
                       <CardTitle className="text-lg">{course.name}</CardTitle>
-                      <Badge variant="secondary" className="bg-gaming-primary/20 text-gaming-primary">
-                        Activ
-                      </Badge>
+                      {runningCourseId === course.id && (
+                        <Badge variant="secondary" className="bg-gaming-primary/20 text-gaming-primary">
+                          Rulează
+                        </Badge>
+                      )}
                     </div>
                   </CardHeader>
                   <CardContent>
@@ -217,44 +212,45 @@ export default function Dashboard() {
                         </div>
                         <div className="flex items-center space-x-2">
                           <Users className="h-4 w-4 text-muted-foreground" />
-                          <span>{course.robotCount} robots</span>
+                          <span>{course.robotCount} roboți</span>
                         </div>
                       </div>
                       <div className="text-xs text-muted-foreground">
-                        Created {formatDate(course.createdAt)}
+                        Creat {formatDate(course.createdAt)}
                       </div>
                       <div className="flex space-x-2 pt-2">
-			 <Button
-			   size="sm"
-			   variant="outline"
-			   className="flex-1 flex items-center justify-center space-x-1"
-			   onClick={() => handleEditCourse(course.id)}
-			   disabled={editingCourseId === course.id}
-			 >
-			   {editingCourseId === course.id ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-			   <span>Edit</span>
-			 </Button>
-           		<Button
-             		size="sm"
-		            className="flex-1 flex items-center justify-center space-x-1"
-		            onClick={() => handleRunCourse(course.id)}
-		            disabled={loadingCourseId === course.id}
-           		>
-		            {loadingCourseId === course.id
-		              ? <Loader2 className="h-3 w-3 animate-spin" />
-			      : runningCourseId === course.id
-				? <StopCircle className="h-3 w-3" />
-				: <Play className="h-3 w-3" />
-			    }
-			    <span>
-			      {runningCourseId === course.id ? 'Stop' : 'Go'}
-			    </span>
-			   </Button>
+       <Button
+         size="sm"
+         variant="outline"
+         className="flex-1 flex items-center justify-center space-x-1"
+         onClick={() => handleEditCourse(course.id)}
+         disabled={editingCourseId === course.id}
+       >
+         {editingCourseId === course.id ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+         <span>Editare</span>
+       </Button>
+               <Button
+                 size="sm"
+                className="flex-1 flex items-center justify-center space-x-1"
+                onClick={() => handleRunCourse(course.id)}
+                disabled={loadingCourseId === course.id}
+               >
+                {loadingCourseId === course.id
+                  ? <Loader2 className="h-3 w-3 animate-spin" />
+            : runningCourseId === course.id
+        ? <StopCircle className="h-3 w-3" />
+        : <Play className="h-3 w-3" />
+          }
+          <span>
+            {runningCourseId === course.id ? 'Oprire' : 'Pornire'}
+          </span>
+         </Button>
                         <Button 
                           size="sm" 
                           variant="destructive" 
                           className="w-10"
-                          onClick={() => handleDeleteCourse(course.id)}
+                          onClick={() => handleDeleteCourse(course)}
+                          aria-label={`Ștergeți ${course.name}`}
                         >
                           <Trash2 className="h-3 w-3" />
                         </Button>
